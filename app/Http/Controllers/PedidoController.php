@@ -120,65 +120,98 @@ class PedidoController extends Controller
 
         return response()->json(['message' => 'Pedido servido por ' . $request->user()->name]);
     }
-    // 5. MIS ESTADÍSTICAS (Solo lo que YO he servido)
+    // 5. ESTADÍSTICAS AGRUPADAS POR CLIENTE (MODO CAMARERO PRO)
     public function stats(Request $request)
     {
-        $user = $request->user(); // Este soy YO (el admin conectado)
-        $rol = $user->role;
+        $user = $request->user(); // Tú (el camarero)
 
-        if ($rol !== 'admin' && $rol !== 'superadmin') {
-            return response()->json(['message' => 'Acceso denegado'], 403);
-        }
-
-        // A. Calcular TOTALES por bebida (SOLO LO QUE HE SERVIDO YO)
-        $totales = DB::table('detalle_pedidos')
+        // A. RANKING GLOBAL (Esto lo dejamos igual, mola ver qué se vende más)
+        $ranking = DB::table('detalle_pedidos')
             ->join('pedidos', 'detalle_pedidos.pedido_id', '=', 'pedidos.id')
             ->join('bebidas', 'detalle_pedidos.bebida_id', '=', 'bebidas.id')
             ->where('pedidos.status', 'servido')
-            ->where('pedidos.camarero_id', $user->id) // <--- FILTRO PERSONAL 🛑
+            ->where('pedidos.camarero_id', $user->id)
             ->select('bebidas.nombre', DB::raw('sum(detalle_pedidos.cantidad) as total_vendido'))
             ->groupBy('bebidas.nombre')
             ->orderByDesc('total_vendido')
             ->get();
 
-        // B. Historial detallado (SOLO LO QUE HE SERVIDO YO)
-        $historial = Pedido::with(['user', 'camarero', 'detalles.bebida'])
+        // B. HISTORIAL AGRUPADO POR PERSONA
+        // 1. Sacamos todos tus pedidos servidos
+        $pedidosRaw = Pedido::with(['user', 'detalles.bebida'])
             ->where('status', 'servido')
-            ->where('camarero_id', $user->id) // <--- FILTRO PERSONAL 🛑
-            ->orderBy('updated_at', 'desc')
-            ->take(50)
+            ->where('camarero_id', $user->id)
             ->get();
 
+        // 2. Los agrupamos por Cliente
+        $porCliente = $pedidosRaw->groupBy('user_id')->map(function ($pedidosDelCliente) {
+            $cliente = $pedidosDelCliente->first()->user;
+
+            // Sumamos todo lo que ha gastado este señor contigo
+            $gastoTotal = $pedidosDelCliente->sum('total');
+
+            // Juntamos las bebidas (Ej: 2 cañas antes + 1 caña ahora = 3 cañas)
+            $bebidasResumen = [];
+            foreach ($pedidosDelCliente as $pedido) {
+                foreach ($pedido->detalles as $detalle) {
+                    $nombre = $detalle->bebida->nombre;
+                    if (!isset($bebidasResumen[$nombre])) {
+                        $bebidasResumen[$nombre] = 0;
+                    }
+                    $bebidasResumen[$nombre] += $detalle->cantidad;
+                }
+            }
+
+            return [
+                'id' => $cliente->id,
+                'nombre' => $cliente->name,
+                'total_gastado' => number_format($gastoTotal, 2),
+                'bebidas' => $bebidasResumen // Array tipo ['Kalimotxo' => 3, 'Cerveza' => 1]
+            ];
+        })->values(); // Re-indexar para enviar JSON limpio
+
         return response()->json([
-            'resumen' => $totales,
-            'historial' => $historial
+            'resumen' => $ranking,
+            'historial' => $porCliente
         ]);
     }
-    // 6. BORRAR SOLO MI HISTORIAL (RESET PERSONAL)
+    // 6. BORRAR MI HISTORIAL Y DEVOLVER EL DINERO 💰
     public function reset(Request $request)
     {
-        $user = $request->user();
-        
-        // 1. Buscamos los IDs de los pedidos que has servido TÚ
-        $misPedidosIds = DB::table('pedidos')
-                            ->where('camarero_id', $user->id)
-                            ->pluck('id'); // Esto nos da una lista: [1, 5, 8...]
+        $user = $request->user(); // El camarero (Tú)
 
-        if ($misPedidosIds->isEmpty()) {
+        // 1. Buscamos los pedidos COMPLETOS que has servido TÚ
+        // Usamos 'get()' para tener los datos del precio y el cliente
+        $misPedidos = Pedido::where('camarero_id', $user->id)->get();
+
+        if ($misPedidos->isEmpty()) {
             return response()->json(['message' => 'No tienes nada que borrar 🤷‍♂️']);
         }
 
-        // 2. Borramos los detalles (las líneas de bebida) de ESOS pedidos
+        // 2. DEVOLVER EL DINERO (REFUND)
+        // Recorremos cada pedido tuyo antes de borrarlo
+        foreach ($misPedidos as $pedido) {
+            // Al usuario que hizo el pedido ($pedido->user_id)...
+            // ...le SUMAMOS el total al saldo ($pedido->total)
+            DB::table('users')
+                ->where('id', $pedido->user_id)
+                ->increment('saldo', $pedido->total); 
+        }
+
+        // 3. Ahora que hemos devuelto el dinero, borramos los registros
+        $idsParaBorrar = $misPedidos->pluck('id');
+
+        // Borramos detalles
         DB::table('detalle_pedidos')
-            ->whereIn('pedido_id', $misPedidosIds)
+            ->whereIn('pedido_id', $idsParaBorrar)
             ->delete();
 
-        // 3. Borramos los pedidos (las cabeceras)
+        // Borramos cabeceras
         DB::table('pedidos')
-            ->whereIn('id', $misPedidosIds) // Solo los tuyos
+            ->whereIn('id', $idsParaBorrar)
             ->delete();
 
-        return response()->json(['message' => 'Tu historial ha sido borrado. El de los demás sigue intacto.']);
+        return response()->json(['message' => 'Historial borrado y dinero devuelto a los clientes.']);
     }
     
 }
