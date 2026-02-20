@@ -10,11 +10,9 @@ class BebidaController extends Controller
     // GET: Ver la carta (Público para todos los logueados)
     public function index()
     {
-        // Mostramos las activas. 
-        // TRUCO: Si eres SuperAdmin, quizás quieras ver TODAS (incluso las ocultas) para editarlas.
-        // Pero de momento lo dejamos así simple.
-        
-        return response()->json(Bebida::where('is_active', true)->get());
+        $bebidasActivas = Bebida::where('is_active', true)->orderBy('nombre')->get();
+        $bebidasAgrupadas = $bebidasActivas->groupBy('categoria');
+        return response()->json($bebidasAgrupadas);
     }
 
     // POST: Crear nueva bebida (SOLO SUPERADMIN)
@@ -44,7 +42,7 @@ class BebidaController extends Controller
         $request->validate([
             'nombre' => 'sometimes|string',
             'precio' => 'sometimes|numeric|min:0',
-            'activo' => 'sometimes|boolean' // Para ocultarla si se acaba el barril
+            'is_active' => 'sometimes|boolean' // Para ocultarla si se acaba el barril
         ]);
 
         $bebida->update($request->all());
@@ -62,7 +60,7 @@ class BebidaController extends Controller
         // Pero si insistes en borrar, usa delete().
         $bebida = Bebida::findOrFail($id);
         
-        $bebida->update(['activo' => false]);
+        $bebida->update(['is_active' => false]);
         // Opción B: Borrado total -> $bebida->delete();
         
         return response()->json(['message' => 'Bebida retirada de la carta 🚫']);
