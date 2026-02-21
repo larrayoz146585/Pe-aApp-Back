@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BebidaController;
 use App\Http\Controllers\PedidoController;
+use App\Http\Controllers\UserController;
 
 /*
 |--------------------------------------------------------------------------
@@ -30,7 +31,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // --- CARTA DE BEBIDAS ---
     Route::get('/bebidas', [BebidaController::class, 'index']); // Ver carta (Todos)
-    
+    Route::get('/admin/bebidas', [BebidaController::class, 'adminIndex']);
+    Route::post('admin/bebidas/create', [BebidaController::class, 'store']);
+    Route::put('admin/bebidas/{id}/update', [BebidaController::class, 'update']);
+    Route::delete('admin/bebidas/{id}/delete', [BebidaController::class, 'destroy']);
     // Gestión de la carta (El controlador verificará si eres SuperAdmin)
     Route::post('/bebidas', [BebidaController::class, 'store']);       // Crear bebida
     Route::put('/bebidas/{id}', [BebidaController::class, 'update']);  // Editar bebida
@@ -43,8 +47,12 @@ Route::middleware('auth:sanctum')->group(function () {
     // --- ZONA CAMARERO (ADMIN) ---
     Route::get('/admin/pedidos', [PedidoController::class, 'index']); // Ver comandas en cocina
     Route::put('/pedidos/{id}/servir', [PedidoController::class, 'marcarServido']); // Servir copa
-
+Route::delete('/admin/pedidos/{id}', [PedidoController::class, 'destroy']); // Cancelar pedido
     Route::get('/admin/estadisticas', [PedidoController::class, 'stats']);
-
     Route::delete('/admin/reset-pedidos', [PedidoController::class, 'reset']);
+
+    //SUPERADMIN
+    Route::get('/admin/usuarios', [UserController::class, 'index']);
+    Route::put('/admin/usuarios/{id}', [UserController::class, 'update']);
+    Route::delete('/admin/usuarios/{id}', [UserController::class, 'destroy']);
 });

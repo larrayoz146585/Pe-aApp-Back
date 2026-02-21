@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 class PedidoController extends Controller
 {
     // 1. HACER PEDIDO (Cliente)
+// 1. HACER PEDIDO (Cliente)
     public function store(Request $request)
     {
         $request->validate([
@@ -40,10 +41,8 @@ class PedidoController extends Controller
                     ];
                 }
 
-                // 🚨 AQUÍ ESTÁ EL CAMBIO NUCLEAR 🚨
-                // No usamos $user->save(). Usamos decrement directo a la tabla.
-                // Esto resta el dinero SÍ O SÍ.
-                DB::table('users')->where('id', $user->id)->decrement('saldo', $totalCalculado);
+                // 🚨 ELIMINAMOS EL DECREMENT AQUÍ 🚨
+                // Ya no cobramos al crear el pedido. Lo cobraremos al servir.
 
                 // 2. Crear pedido
                 $pedido = Pedido::create([
@@ -62,14 +61,13 @@ class PedidoController extends Controller
                     ]);
                 }
 
-                // Recuperamos el usuario actualizado para enviarlo al móvil
                 $user->refresh(); 
 
                 return response()->json([
                     'message' => '¡Pedido en marcha! 🍻', 
                     'pedido' => $pedido,
                     'debug_total' => $totalCalculado, 
-                    'nuevo_saldo' => $user->saldo
+                    'nuevo_saldo' => $user->saldo // El saldo seguirá igual de momento
                 ], 201);
             });
 
@@ -77,7 +75,6 @@ class PedidoController extends Controller
             return response()->json(['error' => 'Error: ' . $e->getMessage()], 500);
         }
     }
-
     // 2. VER MIS PEDIDOS (Cliente)
     public function misPedidos(Request $request)
     {
@@ -108,17 +105,26 @@ class PedidoController extends Controller
     }
 
     // 4. MARCAR COMO SERVIDO
-    public function marcarServido(Request $request, $id) // <--- Añadimos Request $request
+// 4. MARCAR COMO SERVIDO Y COBRAR
+    public function marcarServido(Request $request, $id) 
     {
         $pedido = Pedido::findOrFail($id);
+
+        // Prevenir que se cobre dos veces si alguien le da doble clic rápido
+        if ($pedido->status === 'servido') {
+            return response()->json(['message' => 'Este pedido ya fue servido'], 400);
+        }
+
+        // 🚨 AHORA SÍ: Cobramos al usuario el total del pedido 🚨
+        DB::table('users')->where('id', $pedido->user_id)->decrement('saldo', $pedido->total);
 
         // Actualizamos estado Y guardamos quién lo hizo
         $pedido->update([
             'status' => 'servido',
-            'camarero_id' => $request->user()->id  // <--- AQUÍ GUARDAMOS TU FIRMA
+            'camarero_id' => $request->user()->id  
         ]);
 
-        return response()->json(['message' => 'Pedido servido por ' . $request->user()->name]);
+        return response()->json(['message' => 'Pedido servido y cobrado por ' . $request->user()->name]);
     }
     // 5. ESTADÍSTICAS AGRUPADAS POR CLIENTE (MODO CAMARERO PRO)
     public function stats(Request $request)
@@ -212,6 +218,30 @@ class PedidoController extends Controller
             ->delete();
 
         return response()->json(['message' => 'Historial borrado y dinero devuelto a los clientes.']);
+    }
+    // 7. CANCELAR PEDIDO PENDIENTE
+    public function destroy(Request $request, $id)
+    {
+        $rol = $request->user()->role;
+        // Solo camareros/admins pueden cancelar desde esta vista
+        if ($rol !== 'admin' && $rol !== 'superadmin') {
+            return response()->json(['message' => 'No tienes permiso 👮‍♂️'], 403);
+        }
+
+        $pedido = Pedido::findOrFail($id);
+
+        // Solo se pueden cancelar pedidos pendientes (que aún no han sido cobrados)
+        if ($pedido->status !== 'pendiente') {
+            return response()->json(['message' => 'No puedes cancelar un pedido ya servido'], 400);
+        }
+
+        // Borramos los detalles primero para evitar errores de claves foráneas
+        DB::table('detalle_pedidos')->where('pedido_id', $pedido->id)->delete();
+        
+        // Borramos el pedido
+        $pedido->delete();
+
+        return response()->json(['message' => 'Pedido cancelado correctamente 🗑️']);
     }
     
 }

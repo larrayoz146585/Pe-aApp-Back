@@ -73,4 +73,14 @@ class BebidaController extends Controller
             abort(403, 'Acceso Denegado: Solo el Jefe Supremo puede tocar los precios 👮‍♂️');
         }
     }
+    public function adminIndex(Request $request)
+    {
+        $this->checkSuperAdmin($request);
+
+        // Devuelve TODAS las bebidas, activas e inactivas, como un array plano.
+        $todasLasBebidas = Bebida::orderBy('nombre')->get();
+        return response()->json($todasLasBebidas);
+    }
+
+
 }
