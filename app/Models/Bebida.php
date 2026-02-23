@@ -10,16 +10,14 @@ class Bebida extends Model
     use HasFactory;
 
     protected $fillable = [
-        'nombre', 
-        'precio', 
-        'categoria', 
-        'imagen_url', 
-        'activo'
+        'nombre',
+        'precio',
+        'categoria',
+        'is_active',
     ];
 
-    // Convertimos datos automáticamente para que sean fáciles de usar
     protected $casts = [
-        'precio' => 'decimal:2',
-        'activo' => 'boolean',
+        'precio'    => 'decimal:2',
+        'is_active' => 'boolean',
     ];
 }

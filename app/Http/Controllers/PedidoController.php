@@ -3,135 +3,128 @@
 namespace App\Http\Controllers;
 
 use App\Models\Pedido;
-use App\Models\DetallePedido;
-use App\Models\Bebida;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
-
 class PedidoController extends Controller
 {
-    // 1. HACER PEDIDO (Cliente)
-// 1. HACER PEDIDO (Cliente)
+    // 1. HACER UN PEDIDO (Cliente)
     public function store(Request $request)
     {
         $request->validate([
-            'items' => 'required|array|min:1',
+            'items'             => 'required|array|min:1',
             'items.*.bebida_id' => 'required|exists:bebidas,id',
-            'items.*.cantidad' => 'required|integer|min:1',
+            'items.*.cantidad'  => 'required|integer|min:1',
         ]);
 
+        $user = $request->user();
+
         try {
-            return DB::transaction(function () use ($request) {
-                
-                $user = $request->user();
+            DB::transaction(function () use ($request, $user) {
                 $totalCalculado = 0;
-                $detallesParaGuardar = [];
 
-                // 1. Calcular total y preparar datos
                 foreach ($request->items as $item) {
-                    $bebida = Bebida::findOrFail($item['bebida_id']);
-                    $subtotal = $bebida->precio * $item['cantidad'];
-                    $totalCalculado += $subtotal;
-
-                    $detallesParaGuardar[] = [
-                        'bebida_id' => $bebida->id,
-                        'cantidad' => $item['cantidad'],
-                        'precio_unitario' => $bebida->precio
-                    ];
+                    $bebida = DB::table('bebidas')->where('id', $item['bebida_id'])->first();
+                    if (!$bebida || !$bebida->is_active) {
+                        throw new \Exception("La bebida con id {$item['bebida_id']} no esta disponible.");
+                    }
+                    $totalCalculado += $bebida->precio * $item['cantidad'];
                 }
 
-                // 🚨 ELIMINAMOS EL DECREMENT AQUÍ 🚨
-                // Ya no cobramos al crear el pedido. Lo cobraremos al servir.
-
-                // 2. Crear pedido
                 $pedido = Pedido::create([
                     'user_id' => $user->id,
-                    'status' => 'pendiente',
-                    'total' => $totalCalculado
+                    'status'  => 'pendiente',
+                    'total'   => $totalCalculado,
                 ]);
 
-                // 3. Guardar detalles
-                foreach ($detallesParaGuardar as $detalle) {
-                    DetallePedido::create([
-                        'pedido_id' => $pedido->id,
-                        'bebida_id' => $detalle['bebida_id'],
-                        'cantidad' => $detalle['cantidad'],
-                        'precio_unitario' => $detalle['precio_unitario'],
+                foreach ($request->items as $item) {
+                    $bebida = DB::table('bebidas')->where('id', $item['bebida_id'])->first();
+                    DB::table('detalle_pedidos')->insert([
+                        'pedido_id'       => $pedido->id,
+                        'bebida_id'       => $item['bebida_id'],
+                        'cantidad'        => $item['cantidad'],
+                        'precio_unitario' => $bebida->precio,
+                        'created_at'      => now(),
+                        'updated_at'      => now(),
                     ]);
                 }
-
-                $user->refresh(); 
-
-                return response()->json([
-                    'message' => '¡Pedido en marcha! 🍻', 
-                    'pedido' => $pedido,
-                    'debug_total' => $totalCalculado, 
-                    'nuevo_saldo' => $user->saldo // El saldo seguirá igual de momento
-                ], 201);
             });
 
         } catch (\Exception $e) {
             return response()->json(['error' => 'Error: ' . $e->getMessage()], 500);
         }
+
+        return response()->json(['message' => 'Pedido recibido!'], 201);
     }
+
     // 2. VER MIS PEDIDOS (Cliente)
     public function misPedidos(Request $request)
     {
-        $pedidos = Pedido::with('detalles.bebida') // Traemos también los detalles y nombres de bebidas
-                    ->where('user_id', $request->user()->id)
-                    ->orderBy('created_at', 'desc')
-                    ->get();
+        $pedidos = Pedido::with('detalles.bebida')
+            ->where('user_id', $request->user()->id)
+            ->orderBy('created_at', 'desc')
+            ->get();
 
         return response()->json($pedidos);
     }
 
     // 3. VER COMANDAS PENDIENTES (Camarero/Admin)
+    // Si el cliente tiene camareros asignados: solo ellos ven sus comandas
+    // Si el cliente NO tiene camareros: lo ven todos los admins
     public function index(Request $request)
     {
-        $rol = $request->user()->role;
-        // Solo el admin puede ver esto
-        if ($rol !== 'admin' && $rol !== 'superadmin') {
-            return response()->json(['message' => 'No eres camarero 👮‍♂️'], 403);
+        $adminActual = $request->user();
+
+        if (!in_array($adminActual->role, ['admin', 'superadmin'])) {
+            return response()->json(['message' => 'No eres camarero'], 403);
         }
 
-        // Traer pedidos pendientes, ordenados del más antiguo al más nuevo
-        $pendientes = Pedido::with(['user', 'detalles.bebida'])
-                        ->where('status', 'pendiente')
-                        ->orderBy('created_at', 'asc') 
-                        ->get();
+        $pendientes = Pedido::with(['user.camareros', 'detalles.bebida'])
+            ->where('status', 'pendiente')
+            ->orderBy('created_at', 'asc')
+            ->get();
 
-        return response()->json($pendientes);
+        $filtrados = $pendientes->filter(function ($pedido) use ($adminActual) {
+            $cliente = $pedido->user;
+            if (!$cliente) return false;
+
+            $camareroIds = $cliente->camareros->pluck('id');
+
+            // Sin camareros asignados: lo ven todos
+            if ($camareroIds->isEmpty()) return true;
+
+            // Con camareros asignados: solo los seleccionados
+            return $camareroIds->contains($adminActual->id);
+        });
+
+        return response()->json($filtrados->values());
     }
 
-    // 4. MARCAR COMO SERVIDO
-// 4. MARCAR COMO SERVIDO Y COBRAR
-    public function marcarServido(Request $request, $id) 
+    // 4. MARCAR COMO SERVIDO Y COBRAR
+    public function marcarServido(Request $request, $id)
     {
         $pedido = Pedido::findOrFail($id);
 
-        // Prevenir que se cobre dos veces si alguien le da doble clic rápido
         if ($pedido->status === 'servido') {
             return response()->json(['message' => 'Este pedido ya fue servido'], 400);
         }
 
-        // 🚨 AHORA SÍ: Cobramos al usuario el total del pedido 🚨
         DB::table('users')->where('id', $pedido->user_id)->decrement('saldo', $pedido->total);
 
-        // Actualizamos estado Y guardamos quién lo hizo
         $pedido->update([
-            'status' => 'servido',
-            'camarero_id' => $request->user()->id  
+            'status'      => 'servido',
+            'camarero_id' => $request->user()->id,
         ]);
 
         return response()->json(['message' => 'Pedido servido y cobrado por ' . $request->user()->name]);
     }
-    // 5. ESTADÍSTICAS AGRUPADAS POR CLIENTE (MODO CAMARERO PRO)
+
+    // 5. ESTADISTICAS
     public function stats(Request $request)
     {
-        $user = $request->user(); // Tú (el camarero)
+        $user = $request->user();
 
-        // A. RANKING GLOBAL (Esto lo dejamos igual, mola ver qué se vende más)
         $ranking = DB::table('detalle_pedidos')
             ->join('pedidos', 'detalle_pedidos.pedido_id', '=', 'pedidos.id')
             ->join('bebidas', 'detalle_pedidos.bebida_id', '=', 'bebidas.id')
@@ -142,106 +135,71 @@ class PedidoController extends Controller
             ->orderByDesc('total_vendido')
             ->get();
 
-        // B. HISTORIAL AGRUPADO POR PERSONA
-        // 1. Sacamos todos tus pedidos servidos
         $pedidosRaw = Pedido::with(['user', 'detalles.bebida'])
             ->where('status', 'servido')
             ->where('camarero_id', $user->id)
             ->get();
 
-        // 2. Los agrupamos por Cliente
         $porCliente = $pedidosRaw->groupBy('user_id')->map(function ($pedidosDelCliente) {
-            $cliente = $pedidosDelCliente->first()->user;
-
-            // Sumamos todo lo que ha gastado este señor contigo
+            $cliente    = $pedidosDelCliente->first()->user;
             $gastoTotal = $pedidosDelCliente->sum('total');
 
-            // Juntamos las bebidas (Ej: 2 cañas antes + 1 caña ahora = 3 cañas)
             $bebidasResumen = [];
             foreach ($pedidosDelCliente as $pedido) {
                 foreach ($pedido->detalles as $detalle) {
                     $nombre = $detalle->bebida->nombre;
-                    if (!isset($bebidasResumen[$nombre])) {
-                        $bebidasResumen[$nombre] = 0;
-                    }
-                    $bebidasResumen[$nombre] += $detalle->cantidad;
+                    $bebidasResumen[$nombre] = ($bebidasResumen[$nombre] ?? 0) + $detalle->cantidad;
                 }
             }
 
             return [
-                'id' => $cliente->id,
-                'nombre' => $cliente->name,
+                'id'            => $cliente->id,
+                'nombre'        => $cliente->name,
                 'total_gastado' => number_format($gastoTotal, 2),
-                'bebidas' => $bebidasResumen // Array tipo ['Kalimotxo' => 3, 'Cerveza' => 1]
+                'bebidas'       => $bebidasResumen,
             ];
-        })->values(); // Re-indexar para enviar JSON limpio
+        })->values();
 
-        return response()->json([
-            'resumen' => $ranking,
-            'historial' => $porCliente
-        ]);
+        return response()->json(['resumen' => $ranking, 'historial' => $porCliente]);
     }
-    // 6. BORRAR MI HISTORIAL Y DEVOLVER EL DINERO 💰
+
+    // 6. BORRAR HISTORIAL Y DEVOLVER DINERO
     public function reset(Request $request)
     {
-        $user = $request->user(); // El camarero (Tú)
-
-        // 1. Buscamos los pedidos COMPLETOS que has servido TÚ
-        // Usamos 'get()' para tener los datos del precio y el cliente
+        $user       = $request->user();
         $misPedidos = Pedido::where('camarero_id', $user->id)->get();
 
         if ($misPedidos->isEmpty()) {
-            return response()->json(['message' => 'No tienes nada que borrar 🤷‍♂️']);
+            return response()->json(['message' => 'No tienes nada que borrar']);
         }
 
-        // 2. DEVOLVER EL DINERO (REFUND)
-        // Recorremos cada pedido tuyo antes de borrarlo
         foreach ($misPedidos as $pedido) {
-            // Al usuario que hizo el pedido ($pedido->user_id)...
-            // ...le SUMAMOS el total al saldo ($pedido->total)
-            DB::table('users')
-                ->where('id', $pedido->user_id)
-                ->increment('saldo', $pedido->total); 
+            DB::table('users')->where('id', $pedido->user_id)->increment('saldo', $pedido->total);
         }
 
-        // 3. Ahora que hemos devuelto el dinero, borramos los registros
-        $idsParaBorrar = $misPedidos->pluck('id');
+        $ids = $misPedidos->pluck('id');
+        DB::table('detalle_pedidos')->whereIn('pedido_id', $ids)->delete();
+        DB::table('pedidos')->whereIn('id', $ids)->delete();
 
-        // Borramos detalles
-        DB::table('detalle_pedidos')
-            ->whereIn('pedido_id', $idsParaBorrar)
-            ->delete();
-
-        // Borramos cabeceras
-        DB::table('pedidos')
-            ->whereIn('id', $idsParaBorrar)
-            ->delete();
-
-        return response()->json(['message' => 'Historial borrado y dinero devuelto a los clientes.']);
+        return response()->json(['message' => 'Historial borrado y dinero devuelto.']);
     }
+
     // 7. CANCELAR PEDIDO PENDIENTE
     public function destroy(Request $request, $id)
     {
-        $rol = $request->user()->role;
-        // Solo camareros/admins pueden cancelar desde esta vista
-        if ($rol !== 'admin' && $rol !== 'superadmin') {
-            return response()->json(['message' => 'No tienes permiso 👮‍♂️'], 403);
+        if (!in_array($request->user()->role, ['admin', 'superadmin'])) {
+            return response()->json(['message' => 'No tienes permiso'], 403);
         }
 
         $pedido = Pedido::findOrFail($id);
 
-        // Solo se pueden cancelar pedidos pendientes (que aún no han sido cobrados)
         if ($pedido->status !== 'pendiente') {
             return response()->json(['message' => 'No puedes cancelar un pedido ya servido'], 400);
         }
 
-        // Borramos los detalles primero para evitar errores de claves foráneas
         DB::table('detalle_pedidos')->where('pedido_id', $pedido->id)->delete();
-        
-        // Borramos el pedido
         $pedido->delete();
 
-        return response()->json(['message' => 'Pedido cancelado correctamente 🗑️']);
+        return response()->json(['message' => 'Pedido cancelado correctamente']);
     }
-    
 }

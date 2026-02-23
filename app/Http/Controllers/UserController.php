@@ -2,41 +2,39 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Support\Facades\Hash;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 
 class UserController extends Controller
 {
+    // 1. LISTAR TODOS LOS USUARIOS (Solo SuperAdmin)
     public function index(Request $request)
     {
-        // Solo el superadmin puede ver la lista de usuarios
         if ($request->user()->role !== 'superadmin') {
-            abort(403, 'Acceso Denegado: Solo Asier puede entrar');
+            abort(403, 'Acceso Denegado');
         }
-        $usuarios = User::all();
+
+        $usuarios = User::select('id', 'name', 'role', 'saldo')->get();
         return response()->json($usuarios);
     }
-    
-    //actualizar usuario
+
+    // 2. ACTUALIZAR USUARIO (rol, saldo, password)
     public function update(Request $request, $id)
     {
-        //actualizar usuario solo si es superadmin
         if ($request->user()->role !== 'superadmin' && $request->user()->id != $id) {
-            abort(403, 'Acceso Denegado: Solo Asier puede entrar');
+            abort(403, 'Acceso Denegado');
         }
 
         $usuario = User::findOrFail($id);
 
         $validated = $request->validate([
-            // 'sometimes' significa que solo valida si el campo viene en la petición
-            'name' => 'sometimes|string|max:255|unique:users,name,' . $usuario->id,
+            'name'     => 'sometimes|string|max:255|unique:users,name,' . $usuario->id,
             'password' => 'sometimes|string|min:4',
-            'role' => 'sometimes|in:superadmin,admin,cliente', // Solo permite estos roles
-            'saldo' => 'sometimes|numeric'
+            'role'     => 'sometimes|in:superadmin,admin,cliente',
+            'saldo'    => 'sometimes|numeric',
         ]);
 
-        // Si se envía una nueva contraseña, la hasheamos antes de guardarla
         if (isset($validated['password'])) {
             $validated['password'] = Hash::make($validated['password']);
         }
@@ -46,19 +44,62 @@ class UserController extends Controller
         return response()->json(['message' => 'Usuario actualizado correctamente', 'user' => $usuario->fresh()]);
     }
 
-    //borrar usuario
+    // 3. ELIMINAR USUARIO (Solo SuperAdmin)
     public function destroy(Request $request, $id)
     {
-        // Un usuario no se puede borrar a sí mismo
         if ($request->user()->id == $id) {
             abort(403, 'No te puedes borrar a ti mismo.');
         }
-        //borrar usuario solo si es superadmin (o en el futuro, un admin a un cliente)
         if ($request->user()->role !== 'superadmin') {
-            abort(403, 'Acceso Denegado: Solo Asier puede entrar');
+            abort(403, 'Acceso Denegado');
         }
+
         $usuario = User::findOrFail($id);
         $usuario->delete();
+
         return response()->json(['message' => 'Usuario eliminado correctamente.']);
+    }
+
+    // 4. LISTAR ADMINS DISPONIBLES (Para que el cliente elija sus camareros)
+    public function admins(Request $request)
+    {
+        $admins = User::whereIn('role', ['admin', 'superadmin'])
+            ->select('id', 'name', 'role')
+            ->orderBy('name')
+            ->get();
+
+        return response()->json($admins);
+    }
+
+    // 5. VER MIS CAMAREROS ACTUALES (Cliente)
+    public function misCamareros(Request $request)
+    {
+        $camareroIds = $request->user()->camareros()->pluck('users.id');
+        return response()->json($camareroIds);
+    }
+
+    // 6. ACTUALIZAR MIS CAMAREROS (Cliente elige/deselecciona)
+    public function actualizarCamareros(Request $request)
+    {
+        $request->validate([
+            'camarero_ids'   => 'present|array',
+            'camarero_ids.*' => 'integer|exists:users,id',
+        ]);
+
+        $user = $request->user();
+
+        if (!empty($request->camarero_ids)) {
+            $validos = User::whereIn('id', $request->camarero_ids)
+                ->whereIn('role', ['admin', 'superadmin'])
+                ->count();
+
+            if ($validos !== count($request->camarero_ids)) {
+                return response()->json(['message' => 'Algunos usuarios seleccionados no son camareros válidos.'], 422);
+            }
+        }
+
+        $user->camareros()->sync($request->camarero_ids);
+
+        return response()->json(['message' => 'Camareros actualizados correctamente.']);
     }
 }
